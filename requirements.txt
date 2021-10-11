@@ -2,3 +2,4 @@ Flask==1.1.2
 pytest==6.1.0
 loguru==0.5.3
 itsdangerous==1.1.0
+docker-py=1.10.6
