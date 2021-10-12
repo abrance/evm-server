@@ -122,8 +122,8 @@ class DockerAPI(object):
         result = subprocess_popen(
             'mkdir -p /data/mysql/{user_id}-{name} && '
             'docker run -dit -p{port}:3306 --name {name} '
-            '-v /data/mysql/{name}:/var/lib/mysql '
-            '-v /data/mycnf/{name}/my.cnf:/etc/my.cnf '
+            '-v /data/mysql/{user_id}-{name}:/var/lib/mysql '
+            '-v /data/mycnf/{user_id}-{name}/my.cnf:/etc/my.cnf '
             '-e MYSQL_ROOT_PASSWORD={pwd} mysql:5.7'.format_map({
                 'user_id': user_id,
                 'name': name,
@@ -196,6 +196,39 @@ class DockerAPI(object):
             else:
                 logger.error('docker cleaner: rm {} fail'.format(name))
                 return False
+
+    @staticmethod
+    def manage(name, cmd):
+        if cmd == 'start':
+            result = subprocess_popen(
+                'docker start {}'.format(name)
+            )
+            if result:
+                return True
+            else:
+                logger.error('{} start fail'.format(name))
+                return False
+        elif cmd == 'restart':
+            result = subprocess_popen(
+                'docker restart {}'.format(name)
+            )
+            if result:
+                return True
+            else:
+                logger.error('{} restart fail'.format(name))
+                return False
+        elif cmd == 'stop':
+            result = subprocess_popen(
+                'docker stop {}'.format(name)
+            )
+            if result:
+                return True
+            else:
+                logger.error('{} stop fail'.format(name))
+                return False
+        else:
+            logger.error('cmd error')
+            return False
 
 
 dock = DockerAPI()

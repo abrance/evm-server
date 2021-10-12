@@ -175,7 +175,6 @@ class Database(object):
                             pool_type=2,
                             user_id=user_id,
                             is_used=True,
-                            resource_username=dbname,
                             resource_password=base64.b64encode(db_password),
                             resource_name=dbname,
                             create_time=datetime.now()
@@ -186,6 +185,79 @@ class Database(object):
                         return False
                 else:
                     logger.error('min_port error, check db')
+                    return False
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    def resource_ls(self, user_id):
+        try:
+            with self.session_scope() as session:
+                query_rp = session.query(ResourcePool).filter(
+                    ResourcePool.is_used == 1, ResourcePool.user_id == user_id
+                )
+                row_rp = query_rp.first()
+                ls = []
+                if row_rp:
+                    for row_rp in query_rp.all():
+                        if row_rp.pool_type == 1:
+                            pool_type = 'mysql'
+                        elif row_rp.pool_type == 2:
+                            pool_type = 'redis'
+                        elif row_rp.pool_type == 0:
+                            pool_type = 'empty'
+                        else:
+                            pool_type = 'unknown'
+                        ls.append({
+                            'rp_id': row_rp.rp_id,
+                            'pool_type': pool_type,
+                            'url': '{}:{}'.format(config.Config.host, row_rp.port),
+                            'resource_name': row_rp.resource_name,
+                            'resource_username': row_rp.resource_username,
+                            'resource_password': row_rp.resource_password,
+                            'is_used': row_rp.is_used,
+                            'create_time': row_rp.create_time
+                        })
+                return ls
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    def resource_conf(self, user_id, rp_id):
+        try:
+            with self.session_scope() as session:
+                resource = session.query(ResourcePool).filter(
+                    ResourcePool.rp_id == rp_id, ResourcePool.user_id == user_id
+                )
+                rp_row = resource.first()
+                file = ''
+                if rp_row:
+                    if rp_row.pool_type == 1:
+                        file = '/data/mycnf/{}-{}/my.cnf'.format(user_id, rp_row.resource_name)
+                    elif rp_row.pool_type == 2:
+                        file = '/data/redis/{}-{}/redis.conf'.format(user_id, rp_row.resource_name)
+                    else:
+                        pass
+                    return file
+                else:
+                    logger.error('rp_id no found')
+                    return False
+        except Exception as e:
+            logger.error(e)
+            return False
+
+    def resource_manage(self, user_id, rp_id, cmd):
+        try:
+            with self.session_scope() as session:
+                resource = session.query(ResourcePool).filter(
+                    ResourcePool.rp_id == rp_id, ResourcePool.user_id == user_id
+                )
+                rp_row = resource.first()
+                if rp_row:
+                    ret = dock.manage(rp_row.resource_name, cmd)
+                    return ret
+                else:
+                    logger.error('{} no existed'.format(rp_id))
                     return False
         except Exception as e:
             logger.error(e)
