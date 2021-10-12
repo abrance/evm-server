@@ -1,6 +1,7 @@
 import json
 
 from app.log import logger
+from app.resource import db
 from app.utils import verify_password, generate_auth_token, res, error, login_required
 from config import app
 
@@ -35,14 +36,27 @@ def login():
         return jsonify(error("auth error"))
 
 
-# - 申请一个新的 MySQL/Redis 资源实例
+# - 申请一个新的 MySQL 资源实例
 @app.route('/resource/create_mysql', methods=['POST'])
 @login_required
 def create_mysql():
     info = request.form
-    _type = info.get('type')
-    if isinstance(_type, str):
-        if _type == 'mysql':
-            pass
-    return jsonify(res('ok'))
+    user_id = info.get('user_id')
+    dbname, db_username, db_password, db_charset = \
+        info.get('dbname'), info.get('db_username'), info.get('password'), info.get('db_charset')
+    ret = db.create_mysql(user_id, dbname, db_username, db_password, db_charset)
+    if ret:
+        return jsonify(res('ok'))
+    else:
+        return jsonify(error('create mysql fail'))
 
+
+# - 申请一个新的 Redis 资源实例
+@app.route('/resource/create_redis', methods=['POST'])
+@login_required
+def create_redis():
+    info = request.form
+    user_id = info.get('user_id')
+    dbname, db_username, db_password, db_max_memory = \
+        info.get('dbname'), info.get('db_username'), info.get('password'), info.get('db_max_memory')
+    pass

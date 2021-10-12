@@ -116,15 +116,16 @@ class DockerAPI(object):
     #     self.mysql_img = self.client.pull('mysql:5.7', stream=True)
     #     self.redis_img = self.client.pull('redis', stream=True)
 
-    def new_mysql(self, name, port, db_username, db_password):
+    def new_mysql(self, user_id, name, port, db_username, db_password, db_charset):
         # 这里假设name不重名，以后可以做成映射表，即name-> container-name
         # docker run -d -it -p3307:3306 -e MYSQL_ROOT_PASSWORD=123456 mysql:5.7
         result = subprocess_popen(
-            'mkdir -p /data/mysql/{name} && '
-            'docker run -dit -p{}:3306 --name {name} '
-            '-v /data/mysql/{name}:/var/lib/mysql'
-            '-v /data/mycnf/{name}/my.cnf:/etc/my.cnf'
+            'mkdir -p /data/mysql/{user_id}-{name} && '
+            'docker run -dit -p{port}:3306 --name {name} '
+            '-v /data/mysql/{name}:/var/lib/mysql '
+            '-v /data/mycnf/{name}/my.cnf:/etc/my.cnf '
             '-e MYSQL_ROOT_PASSWORD={pwd} mysql:5.7'.format_map({
+                'user_id': user_id,
                 'name': name,
                 'port': port,
                 'pwd': self.MYSQL_ROOT_PASSWORD
@@ -135,12 +136,25 @@ class DockerAPI(object):
             # result 为容器名
             result = subprocess_popen(
                 'docker exec {} '
-                'echo "CREATE USER {}@% identified by {};\nGRANT ALL ON *.* TO {}@%; > ./add_user.sql'
+                'echo "CREATE USER {}@% identified by {};GRANT ALL ON *.* TO {}@%; > ./add_user.sql'
                 'mysql -uroot -p{} -Dmysql < ./add_user.sql"'.format(
                     result, self.MYSQL_ROOT_PASSWORD, db_username, db_password, db_username)
             )
             if result:
                 # 执行新增用户成功
+                if db_charset:
+                    result2 = subprocess_popen(
+                        'docker exec {} '
+                        'echo "[mysqld]\ncharacter-set-server = utf8\n[client]'
+                        '\ndefault-character-set = utf8\n[mysql]'
+                        '\ndefault-character-set = utf8\n" >> /etc/my.cnf && docker restart {}'.format(name, name)
+                    )
+                    if result2:
+                        return True
+                    else:
+                        logger.error('db charset set error')
+                        # 不用回退，通过接口进行设置my.cnf即可
+                        return False
                 return True
             else:
                 logger.error('container error')
@@ -149,3 +163,39 @@ class DockerAPI(object):
             # 容器运行失败
             logger.error('container run fail')
             return False
+
+    @staticmethod
+    def new_redis(user_id, name, port, db_password, db_max_memory):
+        # https://cloud.tencent.com/developer/article/1866950
+        result = subprocess_popen(
+            'mkdir -p /data/redis/{user_id}-{name} && touch /data/redis/{user_id}-{name}/redis.conf && '
+            'docker run -dit -p{port}:6379 --name {name} '
+            '-v /data/redis/{user_id}-{name}/redis.conf:/etc/redis/redis.conf '
+            '--requirepass "{db_password}" redis'.format_map({
+                    'user_id': user_id,
+                    'name': name,
+                    'port': port,
+                    'db_password': db_password
+                })
+        )
+        if result:
+            if db_max_memory:
+                result = subprocess_popen(
+                    'echo "maxmemory {}" >> /data/redis/{}-{}/redis.conf && docker restart {}' .format(
+                        db_max_memory, user_id, name, name))
+                if result:
+                    return True
+                else:
+                    logger.error('set redis conf fail')
+
+        else:
+            result = subprocess_popen('docker rm {}'.format(name))
+            if result:
+                logger.info('docker cleaner: rm {} success'.format(name))
+                return False
+            else:
+                logger.error('docker cleaner: rm {} fail'.format(name))
+                return False
+
+
+dock = DockerAPI()

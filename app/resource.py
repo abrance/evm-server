@@ -1,24 +1,69 @@
+import contextlib
 import os
 import sys
-import time
-from queue import Queue
+from datetime import datetime
+import base64
 
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+import config
 from app.log import logger
+from app.utils import dock
+
+import sqlalchemy
+from sqlalchemy.ext.declarative import declarative_base
+
+
+class CommitException(BaseException):
+    pass
 
 
 class DuplicationException(BaseException):
     pass
 
 
-class ResourceHandle(object):
+class DuplicateKeyException(BaseException):
+    pass
+
+
+Base = declarative_base()
+
+
+# 用户信息表
+class User(Base):
+    __tablename__ = 'user'
+    user_id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True, autoincrement=True, nullable=False)
+    username = sqlalchemy.Column(sqlalchemy.String(32), nullable=False)
+    email = sqlalchemy.Column(sqlalchemy.String(32), nullable=True)
+    phone = sqlalchemy.Column(sqlalchemy.String(11), nullable=True)
+    password = sqlalchemy.Column(sqlalchemy.String(32), nullable=False)
+    is_delete = sqlalchemy.Column(sqlalchemy.BOOLEAN, nullable=False)
+    create_time = sqlalchemy.Column(sqlalchemy.DateTime, nullable=False, default=datetime.now())
+
+
+class ResourcePool(Base):
+    __tablename__ = 'resource_pool'
+    rp_id = sqlalchemy.Column(sqlalchemy.Integer, primary_key=True, autoincrement=True, nullable=False)
+    # ip = sqlalchemy.Column(sqlalchemy.String(15), nullable=False)
+    port = sqlalchemy.Column(sqlalchemy.Integer, nullable=False)
+    # 未分配为0 mysql为1 redis为2
+    pool_type = sqlalchemy.Column(sqlalchemy.Integer, nullable=False, default=0)
+    user_id = sqlalchemy.Column(sqlalchemy.Integer, nullable=True)
+    # 0为未使用
+    resource_name = sqlalchemy.Column(sqlalchemy.String, nullable=True)
+    resource_username = sqlalchemy.Column(sqlalchemy.String, nullable=True)
+    resource_password = sqlalchemy.Column(sqlalchemy.String, nullable=True)
+    #     resource_name VARCHAR(32) ,                         -- 资源名
+    #     resource_username VARCHAR(32) ,                     -- 资源的用户名
+    #     resource_password VARCHAR(255) ,                    -- 资源的密码
+    is_used = sqlalchemy.Column(sqlalchemy.BOOLEAN, nullable=False, default=0)
+    create_time = sqlalchemy.Column(sqlalchemy.DateTime, nullable=False, default=datetime.now())
+
+
+class Database(object):
     """处理资源申请"""
-    instance = None
-    # 队列最大长度
-    MAXSIZE = 1000
-    # 未使用IP资源池列表
-    RESOURCE_IP_POOL = ['192.168.2.{}'.format(i) for i in range(2, 255)]
-    # 正在使用IP资源池列表
-    DISTRIBUTED_POOL = {}
 
     def __new__(cls):
         """
@@ -31,72 +76,120 @@ class ResourceHandle(object):
             if module:
                 cls = getattr(module, cls.__name__)
         if cls.instance is None:
-            cls.instance = super(ResourceHandle, cls).__new__(cls)
+            cls.instance = super(Database, cls).__new__(cls)
         return cls.instance
 
     def __init__(self):
-        self.queue = Queue(maxsize=self.MAXSIZE)
+        self.engine = sqlalchemy.create_engine(
+            config.Config.db_conn_str,
+            echo=True,  # 输出详细的数据库 SQL 语句
+            pool_recycle=3600  # 要求取得的连接不超过一个小时
+            # 详情请看官方文档的说明
+            # http://docs.sqlalchemy.org/en/rel_1_1/core/pooling.html#setting-pool-recycle
+        )
+        self.Session = sessionmaker(bind=self.engine)
 
-    def handle(self):
-        while True:
-            if self.queue.qsize() == 0:
-                time.sleep(0.01)
+    # 下面函数管理 session 的生命周期，原因详情请看下面给出的官方文档
+    # http://docs.sqlalchemy.org/en/rel_1_1/orm/session_basics.html#when-do-i-construct-a-session-when-do-i-commit-it-and-when-do-i-close-it
+    @contextlib.contextmanager
+    def session_scope(self):
+        session = self.Session()
+        try:
+            yield session
+            session.commit()
+        except Exception as e:
+            logger.error("exception occurs: {}, {}".format(type(e), e))
+            if isinstance(e, IntegrityError):
+                ecode = e.orig.args[0]
+                if ecode == 1062:  # Duplicate key
+                    raise DuplicateKeyException
+                else:
+                    session.rollback()
+                    logger.error("> session commit failed 1, rollback")
+                    raise CommitException
             else:
-                item = self.queue.get()
-                if isinstance(item, tuple):
-                    try:
-                        ip, port, dbname, db_username, db_password, db_charset = item
-                        if ip in self.RESOURCE_IP_POOL:
-                            self.DISTRIBUTED_POOL[ip] = {
-                                'ip': ip,
-                                'port': port,
-                                'db': [
-                                    {
-                                        'dbname': dbname,
-                                        'db_username': db_username,
-                                        'db_password': db_password,
-                                        'db_charset': db_charset
-                                    }
-                                ]
-                            }
-                            self.RESOURCE_IP_POOL.remove(ip)
+                session.rollback()
+                logger.error("> session commit failed 2, rollback")
+                raise CommitException
+        finally:
+            session.close()
 
-                            # 执行 db 初始化 TODO
+    def create_tables(self):
+        Base.metadata.create_all(self.engine)
 
+    def destroy_session(self):
+        self.engine.dispose()
 
-                        else:
-                            _item = self.DISTRIBUTED_POOL.get(ip)
-                            if _item:
-                                dbs = _item.get('db')
-                                if dbs:
-                                    for db in dbs:
-                                        if db.get('dbname') == dbname:
-                                            raise DuplicationException
-                                    assert isinstance(dbs, list)
-                                    dbs.append({
-                                        'dbname': dbname,
-                                        'db_username': db_username,
-                                        'db_password': db_password,
-                                        'db_charset': db_charset
-                                    })
-                                    logger.debug('dbs append {}'.format(item))
-                                    # 执行连接并创建数据库 TODO
-
-
-                    except DuplicationException as de:
-                        logger.error('db existed: {}'.format(de))
+    def create_mysql(self, user_id, dbname, db_username, db_password, db_charset):
+        """
+        创建一个mysql实例。需要指定
+        ip, port, dbname, db-username, db-password, db-charset
+        为了不造成资源冲突问题，使用队列实现申请资源
+        :return:
+        """
+        try:
+            with self.session_scope() as session:
+                # 由系统在资源池中分配ip port等资源
+                min_port = session.query(func.min(ResourcePool.port)).filter(
+                    ResourcePool.is_used == 0
+                )
+                if min_port and min_port > 1023:
+                    # 不能占用保留端口号
+                    port = min_port
+                    ret = dock.new_mysql(user_id, dbname, port, db_username, db_password, db_charset)
+                    if ret:
+                        rp_row = ResourcePool(
+                            port=port,
+                            pool_type=1,
+                            user_id=user_id,
+                            is_used=True,
+                            resource_name=dbname,
+                            resource_username=db_username,
+                            # 密码至少不明文存储
+                            resource_password=base64.b64encode(db_password),
+                            create_time=datetime.now()
+                        )
+                        session.add(rp_row)
+                    else:
                         return False
+                else:
+                    logger.error('min_port error, check db')
+                    return False
+        except Exception as e:
+            logger.error(e)
+            return False
 
-                    except Exception as e:
-                        logger.error(e)
+    def create_redis(self, user_id, dbname, db_password, db_max_memory):
+        try:
+            with self.session_scope() as session:
+                min_port = session.query(func.min(ResourcePool.port)).filter(
+                    ResourcePool.is_used == 0
+                )
+                if min_port and min_port > 1023:
+                    # 不能占用保留端口号
+                    port = min_port
+                    ret = dock.new_redis(user_id, dbname, port, db_password, db_max_memory)
+                    if ret:
+                        rp_row = ResourcePool(
+                            port=port,
+                            pool_type=2,
+                            user_id=user_id,
+                            is_used=True,
+                            resource_username=dbname,
+                            resource_password=base64.b64encode(db_password),
+                            resource_name=dbname,
+                            create_time=datetime.now()
+                        )
+                        session.add(rp_row)
+                    else:
+                        logger.error('docker create redis fail')
                         return False
+                else:
+                    logger.error('min_port error, check db')
+                    return False
+        except Exception as e:
+            logger.error(e)
+            return False
 
 
-def create_mysql(ip, port, dbname, db_username, db_password, db_charset):
-    """
-    创建一个mysql实例。需要指定
-    ip, port, dbname, db-username, db-password, db-charset
-    为了不造成资源冲突问题，使用队列实现申请资源
-    :return:
-    """
-
+db = Database()
