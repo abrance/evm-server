@@ -1,4 +1,4 @@
-/* 请使用 notepad++ 等文本编辑器打开。github地址:
+/* 请使用 notepad++ 等文本编辑器打开。github地址:https://github.com/abrance/evm-server/blob/main/asciiflow.txt
                                              +------------------------------------+
                                              |                                    |
                                              |        resource manage session     |
